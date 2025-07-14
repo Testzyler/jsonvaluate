@@ -1,6 +1,9 @@
 package jsonvaluate
 
 import (
+	"fmt"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -233,4 +236,291 @@ func BenchmarkEvaluateCondition(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		_ = EvaluateCondition(cond, data)
 	}
+}
+
+func TestCustomOperators(t *testing.T) {
+	// Clean up any existing custom operators
+	for _, op := range GetRegisteredCustomOperators() {
+		UnregisterCustomOperator(op)
+	}
+
+	data := map[string]interface{}{
+		"name":  "John Doe",
+		"email": "john@example.com",
+		"age":   25,
+		"score": 85.5,
+	}
+
+	// Test 1: Register a case-insensitive equality operator
+	RegisterCustomOperator("case_insensitive_eq", func(fieldValue, expectedValue interface{}) bool {
+		str1 := strings.ToLower(fmt.Sprintf("%v", fieldValue))
+		str2 := strings.ToLower(fmt.Sprintf("%v", expectedValue))
+		return str1 == str2
+	})
+
+	// Test case-insensitive equality
+	cond1 := Conditions{
+		Key:      "name",
+		Operator: "case_insensitive_eq",
+		Value:    "JOHN DOE",
+	}
+	if !EvaluateCondition(cond1, data) {
+		t.Error("Case insensitive equality should be true")
+	}
+
+	cond2 := Conditions{
+		Key:      "name",
+		Operator: "case_insensitive_eq",
+		Value:    "Jane Doe",
+	}
+	if EvaluateCondition(cond2, data) {
+		t.Error("Case insensitive equality should be false")
+	}
+
+	// Test 2: Register an email domain validator
+	RegisterCustomOperator("email_domain", func(fieldValue, expectedValue interface{}) bool {
+		email := fmt.Sprintf("%v", fieldValue)
+		domain := fmt.Sprintf("%v", expectedValue)
+
+		parts := strings.Split(email, "@")
+		if len(parts) != 2 {
+			return false
+		}
+		return parts[1] == domain
+	})
+
+	// Test email domain validation
+	cond3 := Conditions{
+		Key:      "email",
+		Operator: "email_domain",
+		Value:    "example.com",
+	}
+	if !EvaluateCondition(cond3, data) {
+		t.Error("Email domain validation should be true")
+	}
+
+	cond4 := Conditions{
+		Key:      "email",
+		Operator: "email_domain",
+		Value:    "gmail.com",
+	}
+	if EvaluateCondition(cond4, data) {
+		t.Error("Email domain validation should be false")
+	}
+
+	// Test 3: Register a numeric range operator
+	RegisterCustomOperator("in_range", func(fieldValue, expectedValue interface{}) bool {
+		value, ok := toNumber(fieldValue)
+		if !ok {
+			return false
+		}
+
+		rv := reflect.ValueOf(expectedValue)
+		if rv.Kind() != reflect.Slice || rv.Len() != 2 {
+			return false
+		}
+
+		min, okMin := toNumber(rv.Index(0).Interface())
+		max, okMax := toNumber(rv.Index(1).Interface())
+		if !okMin || !okMax {
+			return false
+		}
+
+		return value >= min && value <= max
+	})
+
+	// Test numeric range validation
+	cond5 := Conditions{
+		Key:      "age",
+		Operator: "in_range",
+		Value:    []interface{}{20, 30},
+	}
+	if !EvaluateCondition(cond5, data) {
+		t.Error("Numeric range validation should be true")
+	}
+
+	cond6 := Conditions{
+		Key:      "age",
+		Operator: "in_range",
+		Value:    []interface{}{30, 40},
+	}
+	if EvaluateCondition(cond6, data) {
+		t.Error("Numeric range validation should be false")
+	}
+
+	// Test 4: Check registered operators
+	registeredOps := GetRegisteredCustomOperators()
+	expectedOps := []Operator{"case_insensitive_eq", "email_domain", "in_range"}
+	if len(registeredOps) != len(expectedOps) {
+		t.Errorf("Expected %d registered operators, got %d", len(expectedOps), len(registeredOps))
+	}
+
+	// Verify all expected operators are registered
+	opMap := make(map[Operator]bool)
+	for _, op := range registeredOps {
+		opMap[op] = true
+	}
+	for _, expectedOp := range expectedOps {
+		if !opMap[expectedOp] {
+			t.Errorf("Expected operator '%s' to be registered", expectedOp)
+		}
+	}
+
+	// Test 5: Unregister an operator
+	UnregisterCustomOperator("email_domain")
+
+	// This should now fail because the operator is unregistered
+	if EvaluateCondition(cond3, data) {
+		t.Error("Unregistered operator should return false")
+	}
+
+	// Verify operator was removed from registry
+	registeredOpsAfter := GetRegisteredCustomOperators()
+	if len(registeredOpsAfter) != 2 {
+		t.Errorf("Expected 2 registered operators after unregistering, got %d", len(registeredOpsAfter))
+	}
+
+	// Test 6: Custom operator with missing key handling
+	RegisterCustomOperator("handle_missing", func(fieldValue, expectedValue interface{}) bool {
+		// This operator returns true if the field is missing and expected value is "missing"
+		if fieldValue == nil && expectedValue == "missing" {
+			return true
+		}
+		return false
+	})
+
+	cond7 := Conditions{
+		Key:      "nonexistent",
+		Operator: "handle_missing",
+		Value:    "missing",
+	}
+	if !EvaluateCondition(cond7, data) {
+		t.Error("Custom operator should handle missing keys")
+	}
+
+	// Test 7: Custom operator in complex condition
+	complexCond := Conditions{
+		Logic: LogicAnd,
+		Children: []Conditions{
+			{Key: "age", Operator: OperatorGt, Value: 18},
+			{Key: "name", Operator: "case_insensitive_eq", Value: "john doe"},
+		},
+	}
+	if !EvaluateCondition(complexCond, data) {
+		t.Error("Complex condition with custom operator should be true")
+	}
+
+	// Clean up
+	for _, op := range GetRegisteredCustomOperators() {
+		UnregisterCustomOperator(op)
+	}
+}
+
+func TestCustomOperatorEdgeCases(t *testing.T) {
+	// Clean up any existing custom operators
+	for _, op := range GetRegisteredCustomOperators() {
+		UnregisterCustomOperator(op)
+	}
+
+	data := map[string]interface{}{
+		"value": "test",
+	}
+
+	// Test 1: Custom operator that panics (should not crash the evaluation)
+	RegisterCustomOperator("panic_operator", func(fieldValue, expectedValue interface{}) bool {
+		panic("This operator panics!")
+	})
+
+	cond := Conditions{
+		Key:      "value",
+		Operator: "panic_operator",
+		Value:    "anything",
+	}
+
+	// This should not panic the entire evaluation
+	result := EvaluateCondition(cond, data)
+	if result {
+		t.Error("Panicking operator should return false")
+	}
+
+	// Test 2: Custom operator with nil validator (should panic when registering)
+	func() {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Error("Registering nil validator should panic")
+			}
+		}()
+		RegisterCustomOperator("nil_operator", nil)
+	}()
+
+	// Test 3: Thread safety test
+	RegisterCustomOperator("thread_safe", func(fieldValue, expectedValue interface{}) bool {
+		return true
+	})
+
+	// Run concurrent access to test thread safety
+	done := make(chan bool, 100)
+	for i := 0; i < 100; i++ {
+		go func() {
+			GetRegisteredCustomOperators()
+			EvaluateCondition(Conditions{
+				Key:      "value",
+				Operator: "thread_safe",
+				Value:    "test",
+			}, data)
+			done <- true
+		}()
+	}
+
+	// Wait for all goroutines to complete
+	for i := 0; i < 100; i++ {
+		<-done
+	}
+
+	// Clean up
+	for _, op := range GetRegisteredCustomOperators() {
+		UnregisterCustomOperator(op)
+	}
+}
+
+func TestQuickCustomOperatorDemo(t *testing.T) {
+	// Clean up any existing custom operators
+	for _, op := range GetRegisteredCustomOperators() {
+		UnregisterCustomOperator(op)
+	}
+
+	// Register a custom operator
+	RegisterCustomOperator("case_insensitive_eq", func(fieldValue, expectedValue interface{}) bool {
+		str1 := strings.ToLower(fmt.Sprintf("%v", fieldValue))
+		str2 := strings.ToLower(fmt.Sprintf("%v", expectedValue))
+		return str1 == str2
+	})
+
+	data := map[string]interface{}{
+		"name": "John Doe",
+	}
+
+	condition := Conditions{
+		Key:      "name",
+		Operator: "case_insensitive_eq",
+		Value:    "JOHN DOE",
+	}
+
+	result := EvaluateCondition(condition, data)
+	if !result {
+		t.Error("Custom operator should return true for case insensitive match")
+	}
+
+	// Check registered operators
+	ops := GetRegisteredCustomOperators()
+	if len(ops) != 1 || ops[0] != "case_insensitive_eq" {
+		t.Errorf("Expected 1 registered operator 'case_insensitive_eq', got %v", ops)
+	}
+
+	// Clean up
+	UnregisterCustomOperator("case_insensitive_eq")
+
+	fmt.Printf("✅ Custom operator demo test passed!\n")
+	fmt.Printf("   - Registered custom operator: %v\n", ops[0])
+	fmt.Printf("   - Evaluated condition successfully: %v\n", result)
 }
