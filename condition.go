@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -81,6 +82,58 @@ type Conditions struct {
 	Key      string      `json:"key,omitempty"`      // Field key for single condition
 	Operator Operator    `json:"operator,omitempty"` // Comparison operator for single condition
 	Value    interface{} `json:"value,omitempty"`    // Expected value for single condition
+}
+
+// CustomOperatorValidator defines the function signature for custom operator validation.
+// It takes the field value from the data and the expected value from the condition,
+// and returns true if the condition is satisfied.
+type CustomOperatorValidator func(fieldValue, expectedValue interface{}) bool
+
+// Thread-safe registry for custom operators
+var (
+	customOperators = make(map[Operator]CustomOperatorValidator)
+	customOpsMutex  sync.RWMutex
+)
+
+// RegisterCustomOperator registers a new custom operator with its validation function.
+// The operator name should be unique and not conflict with built-in operators.
+// The validator function will be called with the field value and expected value.
+//
+// Example:
+//
+//	RegisterCustomOperator("case_insensitive_eq", func(fieldValue, expectedValue interface{}) bool {
+//	    str1 := strings.ToLower(fmt.Sprintf("%v", fieldValue))
+//	    str2 := strings.ToLower(fmt.Sprintf("%v", expectedValue))
+//	    return str1 == str2
+//	})
+func RegisterCustomOperator(operator Operator, validator CustomOperatorValidator) {
+	if validator == nil {
+		panic("custom operator validator cannot be nil")
+	}
+
+	customOpsMutex.Lock()
+	defer customOpsMutex.Unlock()
+	customOperators[operator] = validator
+}
+
+// UnregisterCustomOperator removes a custom operator from the registry.
+// Built-in operators cannot be unregistered.
+func UnregisterCustomOperator(operator Operator) {
+	customOpsMutex.Lock()
+	defer customOpsMutex.Unlock()
+	delete(customOperators, operator)
+}
+
+// GetRegisteredCustomOperators returns a list of all registered custom operators.
+func GetRegisteredCustomOperators() []Operator {
+	customOpsMutex.RLock()
+	defer customOpsMutex.RUnlock()
+
+	operators := make([]Operator, 0, len(customOperators))
+	for op := range customOperators {
+		operators = append(operators, op)
+	}
+	return operators
 }
 
 // EvaluateCondition evaluates a condition tree against the provided data.
@@ -159,8 +212,23 @@ func evalSingleCondition(key string, op Operator, value interface{}, data map[st
 		return !toBool(v)
 	}
 
-	// For other operators, the key must exist
+	// For other built-in operators, the key must exist
 	if !exists {
+		// Check if this is a custom operator first
+		customOpsMutex.RLock()
+		validator, isCustom := customOperators[op]
+		customOpsMutex.RUnlock()
+
+		if isCustom {
+			// Handle panics in custom operators gracefully
+			defer func() {
+				if r := recover(); r != nil {
+					// Custom operator panicked, return false
+				}
+			}()
+			return validator(v, value) // v will be nil for missing keys
+		}
+
 		return false
 	}
 
@@ -200,6 +268,21 @@ func evalSingleCondition(key string, op Operator, value interface{}, data map[st
 	case OperatorNotBetween:
 		return !between(v, value)
 	default:
+		// Check for custom operators
+		customOpsMutex.RLock()
+		validator, exists := customOperators[op]
+		customOpsMutex.RUnlock()
+
+		if exists {
+			// Handle panics in custom operators gracefully
+			defer func() {
+				if r := recover(); r != nil {
+					// Custom operator panicked, return false
+				}
+			}()
+			return validator(v, value)
+		}
+
 		return false
 	}
 }
