@@ -581,6 +581,86 @@ func between(v, bounds interface{}) bool {
 	return compareValues(v, min) >= 0 && compareValues(v, max) <= 0
 }
 
+// ConditionGroup represents a more flexible condition structure that allows
+// different logical operations between different pairs of conditions.
+type ConditionGroup struct {
+	Conditions []ConditionWithLogic `json:"conditions"`
+}
+
+// ConditionWithLogic represents a single condition with an optional logical operator
+// that connects it to the next condition.
+type ConditionWithLogic struct {
+	// Single condition fields
+	Key      string      `json:"key,omitempty"`      // Field key for condition
+	Operator Operator    `json:"operator,omitempty"` // Comparison operator
+	Value    interface{} `json:"value,omitempty"`    // Expected value
+
+	// Group condition (alternative to single condition)
+	Group *ConditionGroup `json:"group,omitempty"` // Nested group of conditions
+
+	// Logic operator to connect to the next condition
+	NextLogic Logic `json:"next_logic,omitempty"` // "AND" or "OR" to connect to next condition
+}
+
+// EvaluateConditionGroup evaluates a ConditionGroup against the provided data.
+// This allows for more flexible logical expressions between conditions.
+//
+// Example usage:
+//
+//	group := ConditionGroup{
+//	    Conditions: []ConditionWithLogic{
+//	        {Key: "sum_insured", Operator: OperatorGte, Value: 200000, NextLogic: LogicAnd},
+//	        {
+//	            Group: &ConditionGroup{
+//	                Conditions: []ConditionWithLogic{
+//	                    {Key: "amount", Operator: OperatorGte, Value: 100000, NextLogic: LogicOr},
+//	                    {Key: "amount", Operator: OperatorLte, Value: 1000000},
+//	                },
+//	            },
+//	            NextLogic: LogicAnd,
+//	        },
+//	        {Key: "percent_of_sum_insured", Operator: "%of", Value: 20},
+//	    },
+//	}
+func EvaluateConditionGroup(group ConditionGroup, data map[string]interface{}) bool {
+	if len(group.Conditions) == 0 {
+		return true
+	}
+
+	// Evaluate first condition
+	result := evaluateConditionWithLogic(group.Conditions[0], data)
+
+	// Process remaining conditions with their logic operators
+	for i := 1; i < len(group.Conditions); i++ {
+		prevCondition := group.Conditions[i-1]
+		currentResult := evaluateConditionWithLogic(group.Conditions[i], data)
+
+		// Apply the logic operator from the previous condition
+		switch prevCondition.NextLogic {
+		case LogicAnd:
+			result = result && currentResult
+		case LogicOr:
+			result = result || currentResult
+		default:
+			// If no logic specified, default to AND
+			result = result && currentResult
+		}
+	}
+
+	return result
+}
+
+// evaluateConditionWithLogic evaluates a single ConditionWithLogic
+func evaluateConditionWithLogic(condition ConditionWithLogic, data map[string]interface{}) bool {
+	// If it's a group condition, evaluate the group
+	if condition.Group != nil {
+		return EvaluateConditionGroup(*condition.Group, data)
+	}
+
+	// Otherwise, evaluate as a single condition
+	return evalSingleCondition(condition.Key, condition.Operator, condition.Value, data)
+}
+
 // Helper functions for creating common condition patterns
 
 // NewSimpleCondition creates a simple condition with key, operator, and value.
@@ -608,5 +688,101 @@ func NewOrGroup(children ...Conditions) Conditions {
 	return Conditions{
 		Logic:    LogicOr,
 		Children: children,
+	}
+}
+
+// Helper functions for creating flexible condition patterns
+
+// NewConditionGroup creates a new ConditionGroup with the specified conditions.
+func NewConditionGroup(conditions ...ConditionWithLogic) ConditionGroup {
+	return ConditionGroup{
+		Conditions: conditions,
+	}
+}
+
+// NewConditionWithLogic creates a single condition with logic operator for the next condition.
+func NewConditionWithLogic(key string, operator Operator, value interface{}, nextLogic Logic) ConditionWithLogic {
+	return ConditionWithLogic{
+		Key:       key,
+		Operator:  operator,
+		Value:     value,
+		NextLogic: nextLogic,
+	}
+}
+
+// NewGroupConditionWithLogic creates a group condition with logic operator for the next condition.
+func NewGroupConditionWithLogic(group ConditionGroup, nextLogic Logic) ConditionWithLogic {
+	return ConditionWithLogic{
+		Group:     &group,
+		NextLogic: nextLogic,
+	}
+}
+
+// ConvertToConditionGroup converts the traditional nested Conditions structure
+// to the new flexible ConditionGroup structure.
+func ConvertToConditionGroup(conditions Conditions) ConditionGroup {
+	// If it's a single condition
+	if conditions.Key != "" {
+		return ConditionGroup{
+			Conditions: []ConditionWithLogic{
+				{
+					Key:      conditions.Key,
+					Operator: conditions.Operator,
+					Value:    conditions.Value,
+				},
+			},
+		}
+	}
+
+	// If it's a group condition
+	if len(conditions.Children) == 0 {
+		return ConditionGroup{}
+	}
+
+	var conditionsWithLogic []ConditionWithLogic
+	for i, child := range conditions.Children {
+		var nextLogic Logic
+		// For all conditions except the last one, use the group's logic
+		if i < len(conditions.Children)-1 {
+			nextLogic = conditions.Logic
+		}
+
+		// If child is a single condition
+		if child.Key != "" {
+			conditionsWithLogic = append(conditionsWithLogic, ConditionWithLogic{
+				Key:       child.Key,
+				Operator:  child.Operator,
+				Value:     child.Value,
+				NextLogic: nextLogic,
+			})
+		} else {
+			// If child is a nested group, convert it recursively
+			childGroup := ConvertToConditionGroup(child)
+			conditionsWithLogic = append(conditionsWithLogic, ConditionWithLogic{
+				Group:     &childGroup,
+				NextLogic: nextLogic,
+			})
+		}
+	}
+
+	return ConditionGroup{
+		Conditions: conditionsWithLogic,
+	}
+}
+
+// EvaluateFlexibleCondition evaluates either the traditional Conditions structure
+// or the new ConditionGroup structure against the provided data.
+func EvaluateFlexibleCondition(conditions interface{}, data map[string]interface{}) bool {
+	switch cond := conditions.(type) {
+	case Conditions:
+		return EvaluateCondition(cond, data)
+	case ConditionGroup:
+		return EvaluateConditionGroup(cond, data)
+	case *Conditions:
+		return EvaluateCondition(*cond, data)
+	case *ConditionGroup:
+		return EvaluateConditionGroup(*cond, data)
+	default:
+		return false
 	}
 }

@@ -524,3 +524,298 @@ func TestQuickCustomOperatorDemo(t *testing.T) {
 	fmt.Printf("   - Registered custom operator: %v\n", ops[0])
 	fmt.Printf("   - Evaluated condition successfully: %v\n", result)
 }
+
+func TestConditionGroup_FlexibleLogic(t *testing.T) {
+	data := map[string]interface{}{
+		"sum_insured":            250000,
+		"amount":                 150000,
+		"percent_of_sum_insured": 25,
+		"age":                    30,
+		"status":                 "active",
+	}
+
+	// Register custom operator for percentage calculation
+	RegisterCustomOperator("%of", func(fieldValue, expectedValue interface{}) bool {
+		value, ok1 := toNumber(fieldValue)
+		percentage, ok2 := toNumber(expectedValue)
+		if !ok1 || !ok2 {
+			return false
+		}
+		return value >= percentage
+	})
+	defer UnregisterCustomOperator("%of")
+
+	// Test 1: Your exact example - mixed logic between conditions
+	// sum_insured >= 200000 AND (amount >= 100000 OR amount <= 1000000) AND percent_of_sum_insured %of 20
+	group := ConditionGroup{
+		Conditions: []ConditionWithLogic{
+			{
+				Key:       "sum_insured",
+				Operator:  OperatorGte,
+				Value:     200000,
+				NextLogic: LogicAnd,
+			},
+			{
+				Group: &ConditionGroup{
+					Conditions: []ConditionWithLogic{
+						{
+							Key:       "amount",
+							Operator:  OperatorGte,
+							Value:     100000,
+							NextLogic: LogicOr,
+						},
+						{
+							Key:      "amount",
+							Operator: OperatorLte,
+							Value:    1000000,
+						},
+					},
+				},
+				NextLogic: LogicAnd,
+			},
+			{
+				Key:      "percent_of_sum_insured",
+				Operator: "%of",
+				Value:    20,
+			},
+		},
+	}
+
+	result := EvaluateConditionGroup(group, data)
+	if !result {
+		t.Error("Flexible logic condition should be true")
+	}
+
+	// Test 2: Different logic combinations
+	// age > 25 OR status == "active" AND sum_insured >= 200000
+	group2 := ConditionGroup{
+		Conditions: []ConditionWithLogic{
+			{
+				Key:       "age",
+				Operator:  OperatorGt,
+				Value:     25,
+				NextLogic: LogicOr,
+			},
+			{
+				Key:       "status",
+				Operator:  OperatorEq,
+				Value:     "active",
+				NextLogic: LogicAnd,
+			},
+			{
+				Key:      "sum_insured",
+				Operator: OperatorGte,
+				Value:    200000,
+			},
+		},
+	}
+
+	result2 := EvaluateConditionGroup(group2, data)
+	if !result2 {
+		t.Error("Mixed OR/AND logic should be true")
+	}
+
+	// Test 3: Test conversion from traditional structure
+	traditionalCondition := Conditions{
+		Logic: LogicAnd,
+		Children: []Conditions{
+			{Key: "sum_insured", Operator: OperatorGte, Value: 200000},
+			{
+				Logic: LogicOr,
+				Children: []Conditions{
+					{Key: "amount", Operator: OperatorGte, Value: 100000},
+					{Key: "amount", Operator: OperatorLte, Value: 1000000},
+				},
+			},
+			{Key: "percent_of_sum_insured", Operator: "%of", Value: 20},
+		},
+	}
+
+	convertedGroup := ConvertToConditionGroup(traditionalCondition)
+	result3 := EvaluateConditionGroup(convertedGroup, data)
+	if !result3 {
+		t.Error("Converted condition should be true")
+	}
+
+	// Test 4: EvaluateFlexibleCondition with both types
+	result4a := EvaluateFlexibleCondition(traditionalCondition, data)
+	result4b := EvaluateFlexibleCondition(group, data)
+	if !result4a || !result4b {
+		t.Error("EvaluateFlexibleCondition should work with both types")
+	}
+}
+
+func TestConditionGroup_HelperFunctions(t *testing.T) {
+	data := map[string]interface{}{
+		"age":    25,
+		"status": "active",
+		"score":  85,
+	}
+
+	// Test helper functions
+	group := NewConditionGroup(
+		NewConditionWithLogic("age", OperatorGt, 18, LogicAnd),
+		NewConditionWithLogic("status", OperatorEq, "active", LogicOr),
+		NewConditionWithLogic("score", OperatorGte, 80, LogicAnd),
+	)
+
+	result := EvaluateConditionGroup(group, data)
+	if !result {
+		t.Error("Helper function created condition should be true")
+	}
+
+	// Test nested group with helper
+	nestedGroup := NewConditionGroup(
+		NewConditionWithLogic("age", OperatorGt, 18, LogicAnd),
+		NewGroupConditionWithLogic(
+			NewConditionGroup(
+				NewConditionWithLogic("status", OperatorEq, "active", LogicOr),
+				NewConditionWithLogic("score", OperatorGte, 80, LogicAnd),
+			),
+			LogicAnd,
+		),
+	)
+
+	result2 := EvaluateConditionGroup(nestedGroup, data)
+	if !result2 {
+		t.Error("Nested group with helper should be true")
+	}
+}
+
+func TestConditionGroup_EdgeCases(t *testing.T) {
+	data := map[string]interface{}{
+		"value": 10,
+	}
+
+	// Test empty group
+	emptyGroup := ConditionGroup{}
+	if !EvaluateConditionGroup(emptyGroup, data) {
+		t.Error("Empty group should return true")
+	}
+
+	// Test single condition
+	singleGroup := ConditionGroup{
+		Conditions: []ConditionWithLogic{
+			{Key: "value", Operator: OperatorEq, Value: 10},
+		},
+	}
+	if !EvaluateConditionGroup(singleGroup, data) {
+		t.Error("Single condition group should be true")
+	}
+
+	// Test default logic (should be AND)
+	defaultLogicGroup := ConditionGroup{
+		Conditions: []ConditionWithLogic{
+			{Key: "value", Operator: OperatorEq, Value: 10}, // No NextLogic specified
+			{Key: "value", Operator: OperatorGt, Value: 5},
+		},
+	}
+	if !EvaluateConditionGroup(defaultLogicGroup, data) {
+		t.Error("Default logic (AND) should work")
+	}
+}
+
+func TestFlexibleConditionDemo(t *testing.T) {
+	// Register custom %of operator
+	RegisterCustomOperator("%of", func(fieldValue, expectedValue interface{}) bool {
+		value, ok1 := toNumber(fieldValue)
+		percentage, ok2 := toNumber(expectedValue)
+		if !ok1 || !ok2 {
+			return false
+		}
+		return value >= percentage
+	})
+	defer UnregisterCustomOperator("%of")
+
+	// Sample insurance data
+	data := map[string]interface{}{
+		"sum_insured":            250000,
+		"amount":                 150000,
+		"percent_of_sum_insured": 25,
+		"age":                    30,
+		"status":                 "active",
+	}
+
+	fmt.Println("\n=== Flexible Condition Logic Demo ===")
+
+	// Your exact example: sum_insured >= 200000 AND (amount >= 100000 OR amount <= 1000000) AND percent_of_sum_insured %of 20
+	flexibleCondition := ConditionGroup{
+		Conditions: []ConditionWithLogic{
+			{
+				Key:       "sum_insured",
+				Operator:  OperatorGte,
+				Value:     200000,
+				NextLogic: LogicAnd, // AND to next condition
+			},
+			{
+				Group: &ConditionGroup{
+					Conditions: []ConditionWithLogic{
+						{
+							Key:       "amount",
+							Operator:  OperatorGte,
+							Value:     100000,
+							NextLogic: LogicOr, // OR to next condition in group
+						},
+						{
+							Key:      "amount",
+							Operator: OperatorLte,
+							Value:    1000000,
+						},
+					},
+				},
+				NextLogic: LogicAnd, // AND to next condition
+			},
+			{
+				Key:      "percent_of_sum_insured",
+				Operator: "%of",
+				Value:    20,
+			},
+		},
+	}
+
+	result := EvaluateConditionGroup(flexibleCondition, data)
+	fmt.Printf("✅ Flexible condition result: %v\n", result)
+	fmt.Printf("   Expression: sum_insured >= 200000 AND (amount >= 100000 OR amount <= 1000000) AND percent_of_sum_insured %%of 20\n")
+
+	// Example of different logic combinations: age > 25 OR status == "active" AND sum_insured >= 200000
+	mixedLogicCondition := ConditionGroup{
+		Conditions: []ConditionWithLogic{
+			{
+				Key:       "age",
+				Operator:  OperatorGt,
+				Value:     25,
+				NextLogic: LogicOr, // OR to next condition
+			},
+			{
+				Key:       "status",
+				Operator:  OperatorEq,
+				Value:     "active",
+				NextLogic: LogicAnd, // AND to next condition
+			},
+			{
+				Key:      "sum_insured",
+				Operator: OperatorGte,
+				Value:    200000,
+			},
+		},
+	}
+
+	result2 := EvaluateConditionGroup(mixedLogicCondition, data)
+	fmt.Printf("✅ Mixed logic result: %v\n", result2)
+	fmt.Printf("   Expression: age > 25 OR status == 'active' AND sum_insured >= 200000\n")
+
+	// Show helper function usage
+	helperCondition := NewConditionGroup(
+		NewConditionWithLogic("sum_insured", OperatorGte, 200000, LogicAnd),
+		NewConditionWithLogic("amount", OperatorGte, 100000, LogicAnd),
+		NewConditionWithLogic("percent_of_sum_insured", "%of", 20, LogicAnd),
+	)
+
+	result3 := EvaluateConditionGroup(helperCondition, data)
+	fmt.Printf("✅ Helper function result: %v\n", result3)
+	fmt.Printf("   Expression: sum_insured >= 200000 AND amount >= 100000 AND percent_of_sum_insured %%of 20\n")
+
+	if !result || !result2 || !result3 {
+		t.Error("All flexible conditions should be true")
+	}
+}
